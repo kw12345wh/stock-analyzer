@@ -1,0 +1,278 @@
+"""
+이동평균선(5/10/60/200일) 기반 매수 신호 분석기
+=================================================
+
+주의: 이 스크립트는 과거 가격 데이터를 이용한 "기술적 지표 규칙"을 계산해서
+보여주는 도구일 뿐, 투자 자문이나 매수/매도 확정 신호가 아닙니다.
+이동평균선은 후행지표이며, 거래량/재무/뉴스 등 다른 요인은 전혀 반영하지 않습니다.
+최종 투자 판단과 책임은 본인에게 있습니다.
+
+사용 예시
+---------
+    py -m pip install -r requirements.txt
+    py analyzer.py 005930          # 삼성전자 (KRX, 6자리 코드)
+    py analyzer.py AAPL            # 애플 (미국 티커)
+    py analyzer.py TSLA --show     # 차트 창을 직접 띄워서 보기
+    py analyzer.py 005930 --out samsung.png
+"""
+
+import argparse
+import sys
+from datetime import datetime, timedelta
+
+import FinanceDataReader as fdr
+import numpy as np
+import pandas as pd
+
+MA_WINDOWS = [5, 10, 60, 200]
+
+
+def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
+    """FinanceDataReader로 시세를 가져온다.
+
+    - 6자리 숫자 코드(예: 005930)면 한국 KRX 종목으로 처리
+    - 그 외(AAPL, TSLA 등)는 해외 티커로 그대로 조회
+    FinanceDataReader가 두 경우 모두 알아서 처리해준다.
+    """
+    if start is None:
+        # MA200을 안정적으로 계산하려면 최소 300여 거래일 데이터가 필요 -> 2년치 조회
+        start = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
+
+    df = fdr.DataReader(ticker, start)
+    if df is None or df.empty:
+        raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
+
+    df = df.sort_index()
+    for w in MA_WINDOWS:
+        df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
+
+    return df
+
+
+def crossed_above(fast: pd.Series, slow: pd.Series, lookback: int) -> bool:
+    """최근 lookback 거래일 안에 fast선이 slow선을 아래에서 위로 돌파(골든크로스)했는지."""
+    recent_fast, recent_slow = fast.tail(lookback + 1), slow.tail(lookback + 1)
+    prev_below = recent_fast.shift(1) < recent_slow.shift(1)
+    now_above = recent_fast > recent_slow
+    return bool((prev_below & now_above).iloc[1:].any())
+
+
+def crossed_below(fast: pd.Series, slow: pd.Series, lookback: int) -> bool:
+    """최근 lookback 거래일 안에 데드크로스가 발생했는지."""
+    recent_fast, recent_slow = fast.tail(lookback + 1), slow.tail(lookback + 1)
+    prev_above = recent_fast.shift(1) > recent_slow.shift(1)
+    now_below = recent_fast < recent_slow
+    return bool((prev_above & now_below).iloc[1:].any())
+
+
+def analyze(df: pd.DataFrame) -> dict:
+    """이동평균선 4개를 규칙 기반으로 채점해서 매수/관망/회피 판단을 만든다."""
+    last = df.iloc[-1]
+    close = last["Close"]
+    ma5, ma10, ma60, ma200 = last["MA5"], last["MA10"], last["MA60"], last["MA200"]
+
+    if pd.isna(ma200):
+        raise ValueError("MA200 계산에 필요한 데이터가 부족합니다. 더 긴 기간의 데이터가 필요합니다.")
+
+    checks = []  # (설명, 충족여부, 배점)
+
+    # 1) 정배열 / 역배열 — 추세 구조
+    bullish_align = ma5 > ma10 > ma60 > ma200
+    bearish_align = ma5 < ma10 < ma60 < ma200
+    checks.append(("정배열 (MA5>MA10>MA60>MA200) — 강한 상승 추세 구조", bullish_align, 2))
+    checks.append(("역배열 (MA5<MA10<MA60<MA200) — 강한 하락 추세 구조", bearish_align, -2))
+
+    # 2) 장기추세 필터 — 현재가와 MA200
+    price_above_200 = close > ma200
+    checks.append(("현재가가 MA200(장기추세선) 위에 위치", price_above_200, 1))
+    checks.append(("현재가가 MA200 아래에 위치 (장기 약세 구간)", not price_above_200, -1))
+
+    # 3) MA200 기울기 — 장기추세 방향
+    ma200_slope_up = None
+    if len(df) > 220 and not pd.isna(df["MA200"].iloc[-21]):
+        ma200_slope_up = ma200 > df["MA200"].iloc[-21]
+        checks.append(("MA200이 20거래일 전보다 상승 중 (장기추세 우상향)", ma200_slope_up, 1))
+
+    # 4) 단기/중기 골든크로스·데드크로스 (최근 발생 여부)
+    gc_5_10 = crossed_above(df["MA5"], df["MA10"], lookback=5)
+    dc_5_10 = crossed_below(df["MA5"], df["MA10"], lookback=5)
+    checks.append(("최근 5거래일 내 MA5-MA10 골든크로스 발생", gc_5_10, 1))
+    checks.append(("최근 5거래일 내 MA5-MA10 데드크로스 발생", dc_5_10, -1))
+
+    gc_10_60 = crossed_above(df["MA10"], df["MA60"], lookback=20)
+    dc_10_60 = crossed_below(df["MA10"], df["MA60"], lookback=20)
+    checks.append(("최근 20거래일 내 MA10-MA60 골든크로스 발생", gc_10_60, 1))
+    checks.append(("최근 20거래일 내 MA10-MA60 데드크로스 발생", dc_10_60, -1))
+
+    # 5) 단기 모멘텀 — 현재가가 단기 이평선 위/아래
+    momentum_up = close > ma5 and close > ma10
+    momentum_down = close < ma5 and close < ma10
+    checks.append(("현재가가 MA5, MA10 모두 위 (단기 모멘텀 양호)", momentum_up, 1))
+    checks.append(("현재가가 MA5, MA10 모두 아래 (단기 모멘텀 약화)", momentum_down, -1))
+
+    score = sum(pts for _, ok, pts in checks if ok)
+    max_score = sum(pts for _, _, pts in checks if pts > 0)
+
+    if score >= 5:
+        decision = "매수 고려 (기술적 신호 긍정적)"
+    elif score >= 2:
+        decision = "관망 / 조건부 (신호 혼조)"
+    else:
+        decision = "매수 보류·회피 (기술적 신호 부정적)"
+
+    return {
+        "date": df.index[-1].strftime("%Y-%m-%d"),
+        "close": close,
+        "ma": {"MA5": ma5, "MA10": ma10, "MA60": ma60, "MA200": ma200},
+        "checks": checks,
+        "score": score,
+        "max_score": max_score,
+        "decision": decision,
+    }
+
+
+def print_report(ticker: str, result: dict) -> None:
+    print("=" * 60)
+    print(f" 이동평균선 분석 리포트 : {ticker}")
+    print("=" * 60)
+    print(f"기준일       : {result['date']}")
+    print(f"현재가(종가) : {result['close']:,.2f}")
+    for name, val in result["ma"].items():
+        print(f"{name:<6}       : {val:,.2f}")
+    print("-" * 60)
+    print("체크리스트")
+    for desc, ok, pts in result["checks"]:
+        mark = "✅" if ok else "➖"
+        sign = f"+{pts}" if pts > 0 else f"{pts}"
+        print(f" {mark} [{sign:>3}] {desc}")
+    print("-" * 60)
+    print(f"종합 점수 : {result['score']} / 최대 {result['max_score']}")
+    print(f"판단      : {result['decision']}")
+    print("=" * 60)
+    print(
+        "※ 본 결과는 5/10/60/200일 이동평균선 규칙만으로 계산한 참고용 기술적 신호이며,\n"
+        "  투자 자문이 아닙니다. 거래량, 재무상태, 시장 상황 등을 함께 고려하시고\n"
+        "  투자 판단과 책임은 본인에게 있습니다."
+    )
+
+
+def add_interactivity(fig, ax) -> None:
+    """차트 창에서 마우스 휠로 확대/축소하고, 클릭한 지점의 날짜·가격을 표시한다.
+
+    - 왼쪽 클릭: 클릭 지점의 날짜/가격을 말풍선으로 표시
+    - 오른쪽 클릭: 말풍선 지우기
+    - 마우스 휠: 커서 위치를 기준으로 확대/축소 (드래그 박스 확대는 툴바의 돋보기 아이콘으로도 가능)
+    """
+    import matplotlib.dates as mdates
+
+    annotation = ax.annotate(
+        "",
+        xy=(0, 0),
+        xytext=(15, 15),
+        textcoords="offset points",
+        bbox=dict(boxstyle="round,pad=0.4", fc="#ffffcc", ec="gray", alpha=0.95),
+        arrowprops=dict(arrowstyle="->"),
+        fontsize=10,
+        visible=False,
+        zorder=10,
+    )
+
+    def on_click(event):
+        if event.inaxes != ax or event.xdata is None or event.ydata is None:
+            return
+        if event.button == 3:  # 오른쪽 클릭 -> 말풍선 숨기기
+            annotation.set_visible(False)
+            fig.canvas.draw_idle()
+            return
+        date_str = mdates.num2date(event.xdata).strftime("%Y-%m-%d")
+        annotation.xy = (event.xdata, event.ydata)
+        annotation.set_text(f"{date_str}\n{event.ydata:,.2f}")
+        annotation.set_visible(True)
+        fig.canvas.draw_idle()
+
+    def on_scroll(event):
+        if event.inaxes != ax or event.xdata is None or event.ydata is None:
+            return
+        base_scale = 1.2
+        scale = 1 / base_scale if event.button == "up" else base_scale
+        xlim, ylim = ax.get_xlim(), ax.get_ylim()
+        xdata, ydata = event.xdata, event.ydata
+        new_w = (xlim[1] - xlim[0]) * scale
+        new_h = (ylim[1] - ylim[0]) * scale
+        relx = (xlim[1] - xdata) / (xlim[1] - xlim[0])
+        rely = (ylim[1] - ydata) / (ylim[1] - ylim[0])
+        ax.set_xlim(xdata - new_w * (1 - relx), xdata + new_w * relx)
+        ax.set_ylim(ydata - new_h * (1 - rely), ydata + new_h * rely)
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("button_press_event", on_click)
+    fig.canvas.mpl_connect("scroll_event", on_scroll)
+
+
+def plot_chart(ticker: str, df: pd.DataFrame, result: dict, out_path: str, show: bool) -> None:
+    import matplotlib
+    import matplotlib.font_manager as fm
+
+    if not show:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Windows 기본 폰트(DejaVu Sans)에는 한글 글리프가 없어 깨져 보이므로
+    # 시스템에 있는 한글 폰트로 교체 (없으면 기본값 유지)
+    for font_name in ("Malgun Gothic", "AppleGothic", "NanumGothic"):
+        if font_name in {f.name for f in fm.fontManager.ttflist}:
+            plt.rcParams["font.family"] = font_name
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+    plot_df = df.tail(300)  # 최근 300거래일만 표시 (MA200 보이도록)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(plot_df.index, plot_df["Close"], label="종가", color="black", linewidth=1.2)
+    colors = {"MA5": "#e74c3c", "MA10": "#f39c12", "MA60": "#2ecc71", "MA200": "#3498db"}
+    for w in MA_WINDOWS:
+        col = f"MA{w}"
+        ax.plot(plot_df.index, plot_df[col], label=col, color=colors[col], linewidth=1.3)
+
+    ax.set_title(f"{ticker}  —  {result['decision']}  (점수 {result['score']}/{result['max_score']})")
+    ax.set_xlabel("날짜")
+    ax.set_ylabel("가격")
+    ax.legend(loc="upper left")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    print(f"\n차트 이미지 저장됨 -> {out_path}")
+
+    if show:
+        add_interactivity(fig, ax)
+        print(
+            "차트 창 사용법: 마우스 휠로 확대/축소, 왼쪽 클릭으로 지점의 날짜·가격 표시, "
+            "오른쪽 클릭으로 표시 지우기 (툴바 돋보기 아이콘으로 드래그 확대도 가능)"
+        )
+        plt.show()
+    plt.close(fig)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="이동평균선 기반 매수 신호 분석기")
+    parser.add_argument("ticker", help="종목코드 또는 티커 (예: 005930, AAPL, TSLA)")
+    parser.add_argument("--start", default=None, help="조회 시작일 YYYY-MM-DD (기본: 2년 전)")
+    parser.add_argument("--out", default=None, help="차트 이미지 저장 경로 (기본: <ticker>_ma_chart.png)")
+    parser.add_argument("--show", action="store_true", help="차트 창을 화면에 직접 띄우기")
+    args = parser.parse_args()
+
+    try:
+        df = fetch_data(args.ticker, args.start)
+        result = analyze(df)
+    except Exception as e:
+        print(f"오류: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print_report(args.ticker, result)
+
+    out_path = args.out or f"{args.ticker}_ma_chart.png"
+    plot_chart(args.ticker, df, result, out_path, args.show)
+
+
+if __name__ == "__main__":
+    main()
