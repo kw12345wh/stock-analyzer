@@ -48,7 +48,8 @@ def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
     df = df.sort_index()
     for w in MA_WINDOWS:
         df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
-    df["ATR14"] = compute_atr(df, period=14)
+    # 장중이라 당일 고가/저가가 아직 확정 안 된 경우를 대비해 직전 유효값으로 채움
+    df["ATR14"] = compute_atr(df, period=14).ffill()
 
     return df
 
@@ -62,11 +63,21 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
       - |당일 저가 - 전일 종가|
     ATR은 이 True Range의 period일 이동평균. 값이 클수록 변동성이 큰 종목이다.
     """
-    high, low, close = df["High"], df["Low"], df["Close"]
+    high, low, close = df.get("High"), df.get("Low"), df["Close"]
     prev_close = close.shift(1)
-    true_range = pd.concat(
-        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
-    ).max(axis=1)
+
+    has_hl = (
+        high is not None and low is not None
+        and high.notna().sum() > period and low.notna().sum() > period
+    )
+    if has_hl:
+        true_range = pd.concat(
+            [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+        ).max(axis=1)
+    else:
+        # 고가/저가 데이터가 부실한 데이터 소스면 종가 변동폭으로 대체 계산
+        true_range = close.diff().abs()
+
     return true_range.rolling(window=period).mean()
 
 
