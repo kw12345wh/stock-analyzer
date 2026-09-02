@@ -288,7 +288,17 @@ if submitted or ticker:
 
     # 기간 버튼 — Plotly 내장 rangeselector는 모바일 폭에서 툴바/범례와 겹치는 문제가 있어
     # 스트림릿 네이티브 버튼으로 대체 (탭 한 번으로 기간 이동, 폭에 맞게 자동으로 줄바꿈됨)
-    period_options = {"1개월": 30, "3개월": 91, "6개월": 182, "1년": 365, "전체": None}
+    # "일" 단위 데이터만 있어서 1일/1주는 달력 일수 대신 최근 거래일 개수로 계산한다
+    # (달력 기준이면 주말·공휴일 직후엔 봉이 하나도 안 잡힐 수 있음).
+    period_options = {
+        "1일": ("trading_days", 2),
+        "1주": ("trading_days", 5),
+        "1개월": ("calendar_days", 30),
+        "3개월": ("calendar_days", 91),
+        "6개월": ("calendar_days", 182),
+        "1년": ("calendar_days", 365),
+        "전체": ("all", None),
+    }
     if "chart_period" not in st.session_state:
         st.session_state["chart_period"] = "6개월"
     def _select_period(label: str) -> None:
@@ -304,8 +314,13 @@ if submitted or ticker:
             type="primary" if is_selected else "secondary",
             key=f"period_{label}", on_click=_select_period, args=(label,),
         )
-    days = period_options[st.session_state["chart_period"]]
-    default_start = plot_df.index[0] if days is None else max(plot_df.index[0], plot_df.index[-1] - pd.Timedelta(days=days))
+    kind, val = period_options[st.session_state["chart_period"]]
+    if kind == "all":
+        default_start = plot_df.index[0]
+    elif kind == "trading_days":
+        default_start = plot_df.index[-val] if len(plot_df) >= val else plot_df.index[0]
+    else:  # calendar_days
+        default_start = max(plot_df.index[0], plot_df.index[-1] - pd.Timedelta(days=val))
 
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03,
