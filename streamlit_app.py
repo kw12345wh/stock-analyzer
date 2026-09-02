@@ -11,6 +11,7 @@
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from analyzer import MA_WINDOWS, analyze, backtest_forward_returns, fetch_data, simulate_position
 
@@ -166,16 +167,35 @@ if submitted or ticker:
         "실제 체결가/수수료/세금은 반영되지 않았습니다."
     )
 
-    # ---- 차트 (인터랙티브: 핀치/드래그 확대, 커서 위치 가격 표시) ----
+    # ---- 거래량 요약 ----
+    st.subheader("📊 거래량")
+    if result.get("volume") is not None and result.get("vma20") is not None:
+        vcol1, vcol2, vcol3 = st.columns(3)
+        vcol1.metric("당일 거래량", f"{result['volume']:,.0f}")
+        vcol2.metric("20일 평균 거래량", f"{result['vma20']:,.0f}")
+        ratio = result["volume_ratio"]
+        ratio_note = "급증" if ratio >= 1.5 else ("급감" if ratio <= 0.5 else "평이")
+        vcol3.metric("평균 대비", f"{ratio:.2f}배", ratio_note, delta_color="off")
+        st.caption(
+            "거래량 급증은 그 방향(상승/하락)에 힘이 실렸다는 뜻이고, 거래량 급감 상태의 등락은 "
+            "관심이 적어 신뢰도가 낮은 움직임일 수 있어요. 체크리스트의 거래량 항목도 참고하세요."
+        )
+    else:
+        st.info("거래량 평균(VMA20) 계산에 필요한 데이터가 부족합니다.")
+
+    # ---- 차트 (인터랙티브: 핀치/드래그 확대, 커서 위치 가격 표시) — 가격 + 거래량 ----
     st.subheader("차트")
     plot_df = df.tail(300)
 
-    fig = go.Figure()
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03,
+    )
     fig.add_trace(
         go.Scatter(
             x=plot_df.index, y=plot_df["Close"], name="종가",
             line=dict(color="#333333", width=1.6),
-        )
+        ),
+        row=1, col=1,
     )
     colors = {"MA5": "#e74c3c", "MA10": "#f39c12", "MA60": "#2ecc71", "MA200": "#3498db"}
     for w in MA_WINDOWS:
@@ -184,17 +204,36 @@ if submitted or ticker:
             go.Scatter(
                 x=plot_df.index, y=plot_df[col], name=col,
                 line=dict(color=colors[col], width=1.4),
-            )
+            ),
+            row=1, col=1,
         )
+
+    # 거래량 바 — 전일 대비 상승/하락에 따라 색상 구분
+    prev_close = plot_df["Close"].shift(1)
+    volume_colors = ["#e74c3c" if c >= p else "#3498db" for c, p in zip(plot_df["Close"], prev_close)]
+    fig.add_trace(
+        go.Bar(x=plot_df.index, y=plot_df["Volume"], name="거래량", marker_color=volume_colors, opacity=0.7),
+        row=2, col=1,
+    )
+    if "VMA20" in plot_df:
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.index, y=plot_df["VMA20"], name="VMA20",
+                line=dict(color="#888888", width=1.2, dash="dot"),
+            ),
+            row=2, col=1,
+        )
+
     fig.update_layout(
         hovermode="x unified",  # 커서 위치의 날짜에서 모든 선의 가격을 한번에 표시
-        height=600,
-        xaxis_title="날짜",
-        yaxis_title="가격",
+        height=700,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
         margin=dict(l=10, r=10, t=40, b=10),
     )
-    fig.update_xaxes(rangeslider_visible=True)  # 하단 미니맵으로도 구간 확대 가능
+    fig.update_yaxes(title_text="가격", row=1, col=1)
+    fig.update_yaxes(title_text="거래량", row=2, col=1)
+    fig.update_xaxes(title_text="날짜", row=2, col=1)
+    fig.update_xaxes(rangeslider_visible=True, row=2, col=1)  # 하단 미니맵으로도 구간 확대 가능
     st.plotly_chart(fig, use_container_width=True)
     st.caption("차트를 드래그하면 확대, 더블클릭하면 원상복구됩니다. 손가락/마우스를 올리면 해당 날짜의 가격이 표시돼요.")
 

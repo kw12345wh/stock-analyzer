@@ -50,6 +50,7 @@ def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
         df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
     # 장중이라 당일 고가/저가가 아직 확정 안 된 경우를 대비해 직전 유효값으로 채움
     df["ATR14"] = compute_atr(df, period=14).ffill()
+    df["VMA20"] = df["Volume"].rolling(window=20).mean()
 
     return df
 
@@ -142,6 +143,25 @@ def analyze(df: pd.DataFrame) -> dict:
     checks.append(("현재가가 MA5, MA10 모두 위 (단기 모멘텀 양호)", momentum_up, 1))
     checks.append(("현재가가 MA5, MA10 모두 아래 (단기 모멘텀 약화)", momentum_down, -1))
 
+    # 6) 거래량 — 20일 평균 대비 급증 여부와 당일 가격 방향을 함께 확인
+    volume = last.get("Volume")
+    vma20 = last.get("VMA20")
+    volume_ratio = (volume / vma20) if pd.notna(volume) and pd.notna(vma20) and vma20 > 0 else None
+    price_up_today = (len(df) > 1) and (close > df["Close"].iloc[-2])
+    price_down_today = (len(df) > 1) and (close < df["Close"].iloc[-2])
+    volume_spike = volume_ratio is not None and volume_ratio >= 1.5
+    volume_dry = volume_ratio is not None and volume_ratio <= 0.5
+
+    checks.append(
+        ("거래량 급증(20일 평균 대비 1.5배 이상) + 상승 마감 — 매수세 유입 신호", volume_spike and price_up_today, 1)
+    )
+    checks.append(
+        ("거래량 급증(20일 평균 대비 1.5배 이상) + 하락 마감 — 매도세 출회 신호", volume_spike and price_down_today, -1)
+    )
+    checks.append(
+        ("거래량이 20일 평균의 절반 이하로 급감 — 관심 저조, 다른 신호의 신뢰도가 낮아짐", volume_dry, 0)
+    )
+
     score = sum(pts for _, ok, pts in checks if ok)
     max_score = sum(pts for _, _, pts in checks if pts > 0)
 
@@ -167,6 +187,9 @@ def analyze(df: pd.DataFrame) -> dict:
         "atr": atr if pd.notna(atr) else None,
         "atr_pct": atr_pct,
         "stop_loss": stop_loss,
+        "volume": volume if pd.notna(volume) else None,
+        "vma20": vma20 if pd.notna(vma20) else None,
+        "volume_ratio": volume_ratio,
     }
 
 
@@ -272,6 +295,13 @@ def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
     momentum_up = (close > ma5) & (close > ma10)
     momentum_down = (close < ma5) & (close < ma10)
 
+    volume_ratio = df["Volume"] / df["VMA20"]
+    price_up_day = close > close.shift(1)
+    price_down_day = close < close.shift(1)
+    volume_spike = volume_ratio >= 1.5
+    volume_spike_up = volume_spike & price_up_day
+    volume_spike_down = volume_spike & price_down_day
+
     score = (
         bullish_align.astype(int) * 2
         + bearish_align.astype(int) * -2
@@ -284,6 +314,8 @@ def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
         + dc_10_60.astype(int) * -1
         + momentum_up.astype(int) * 1
         + momentum_down.astype(int) * -1
+        + volume_spike_up.fillna(False).astype(int) * 1
+        + volume_spike_down.fillna(False).astype(int) * -1
     )
 
     valid = ma200.notna()
@@ -347,6 +379,8 @@ def print_report(ticker: str, result: dict) -> None:
     print(f"현재가(종가) : {result['close']:,.2f}")
     for name, val in result["ma"].items():
         print(f"{name:<6}       : {val:,.2f}")
+    if result.get("volume") is not None and result.get("vma20") is not None:
+        print(f"거래량       : {result['volume']:,.0f}  (20일 평균 {result['vma20']:,.0f}, {result['volume_ratio']:.2f}배)")
     print("-" * 60)
     print("체크리스트")
     for desc, ok, pts in result["checks"]:
