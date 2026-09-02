@@ -47,6 +47,11 @@ if submitted or ticker:
     col2.metric("현재가", f"{result['close']:,.2f}")
     col3.metric("종합 점수", f"{result['score']} / {result['max_score']}")
     col4.metric("판단", result["decision"])
+    st.caption(
+        "🕒 실시간 시세가 아닙니다. 해외 주식은 미국 장 마감 후 한국시간 새벽에 전일 종가로 갱신되고, "
+        "국내 주식은 장중에는 그 시점까지의 잠정 현재가가 표시될 수 있어요. "
+        "위 '기준일'이 오늘 날짜라면 아직 마감 전(장중) 데이터일 수 있습니다."
+    )
 
     if result["score"] >= 5:
         st.success(f"**{result['decision']}**")
@@ -187,6 +192,27 @@ if submitted or ticker:
     st.subheader("차트")
     plot_df = df.tail(300)
 
+    # 기간 버튼 — Plotly 내장 rangeselector는 모바일 폭에서 툴바/범례와 겹치는 문제가 있어
+    # 스트림릿 네이티브 버튼으로 대체 (탭 한 번으로 기간 이동, 폭에 맞게 자동으로 줄바꿈됨)
+    period_options = {"1개월": 30, "3개월": 91, "6개월": 182, "1년": 365, "전체": None}
+    if "chart_period" not in st.session_state:
+        st.session_state["chart_period"] = "6개월"
+    def _select_period(label: str) -> None:
+        st.session_state["chart_period"] = label
+
+    # on_click 콜백을 써야 클릭 즉시(같은 실행 안에서) 눌린 버튼이 강조 표시됨
+    # (버튼의 반환값으로만 처리하면 강조 표시가 한 클릭 늦게 반영됨)
+    period_cols = st.columns(len(period_options))
+    for pcol, label in zip(period_cols, period_options):
+        is_selected = st.session_state["chart_period"] == label
+        pcol.button(
+            label, use_container_width=True,
+            type="primary" if is_selected else "secondary",
+            key=f"period_{label}", on_click=_select_period, args=(label,),
+        )
+    days = period_options[st.session_state["chart_period"]]
+    default_start = plot_df.index[0] if days is None else max(plot_df.index[0], plot_df.index[-1] - pd.Timedelta(days=days))
+
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, row_heights=[0.75, 0.25], vertical_spacing=0.03,
     )
@@ -226,16 +252,37 @@ if submitted or ticker:
 
     fig.update_layout(
         hovermode="x unified",  # 커서 위치의 날짜에서 모든 선의 가격을 한번에 표시
-        height=700,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=10, r=10, t=40, b=10),
+        height=720,
+        # 범례를 차트 안쪽 상단에 반투명으로 배치 — 항상 표시되는 툴바(모드바)와 자리를 다투지 않도록
+        legend=dict(
+            orientation="h", y=0.99, yanchor="top", x=0.01, xanchor="left",
+            bgcolor="rgba(255,255,255,0.75)", font=dict(size=11),
+        ),
+        margin=dict(l=10, r=10, t=36, b=10),
     )
     fig.update_yaxes(title_text="가격", row=1, col=1)
     fig.update_yaxes(title_text="거래량", row=2, col=1)
     fig.update_xaxes(title_text="날짜", row=2, col=1)
-    fig.update_xaxes(rangeslider_visible=True, row=2, col=1)  # 하단 미니맵으로도 구간 확대 가능
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("차트를 드래그하면 확대, 더블클릭하면 원상복구됩니다. 손가락/마우스를 올리면 해당 날짜의 가격이 표시돼요.")
+
+    # 하단 슬라이드바 — 손가락으로 좌우 끝을 드래그해 구간 이동/확대 (두 서브플롯이 x축 공유라 함께 움직임)
+    fig.update_xaxes(
+        rangeslider=dict(visible=True, thickness=0.08, range=[plot_df.index[0], plot_df.index[-1]]),
+        range=[default_start, plot_df.index[-1]],  # 기본 화면은 위 기간 버튼 선택값만큼만 (슬라이드바로 전체 펼쳐보기 가능)
+        row=2, col=1,
+    )
+    fig.update_xaxes(range=[default_start, plot_df.index[-1]], row=1, col=1)
+
+    plotly_config = {
+        "scrollZoom": True,  # 마우스 휠 / 손가락 핀치로 확대·축소
+        "displayModeBar": True,  # 모바일에서도 항상 툴바(확대 버튼 등) 표시
+        "displaylogo": False,
+        "modeBarButtonsToRemove": ["select2d", "lasso2d", "toggleSpikelines"],
+    }
+    st.plotly_chart(fig, use_container_width=True, config=plotly_config)
+    st.caption(
+        "기간 버튼(1개월/3개월/…)으로 빠르게 이동하거나, 하단 슬라이드바 양끝을 드래그해 구간을 조절하세요. "
+        "핀치(또는 마우스 휠)로 확대/축소, 더블클릭하면 원상복구됩니다."
+    )
 
     st.info(
         "※ 본 결과는 이동평균선 규칙만으로 계산한 참고용 기술적 신호이며 투자 자문이 아닙니다. "
