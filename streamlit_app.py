@@ -8,10 +8,11 @@
 배포 후에는 폰/PC 어디서든 브라우저로 URL만 열면 됩니다.
 """
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from analyzer import MA_WINDOWS, analyze, fetch_data
+from analyzer import MA_WINDOWS, analyze, backtest_forward_returns, fetch_data
 
 st.set_page_config(page_title="이동평균선 매수 신호 분석기", page_icon="📈", layout="wide")
 
@@ -100,4 +101,34 @@ if submitted or ticker:
     st.info(
         "※ 본 결과는 이동평균선 규칙만으로 계산한 참고용 기술적 신호이며 투자 자문이 아닙니다. "
         "거래량, 재무상태, 시장 상황 등을 함께 고려하시고 투자 판단과 책임은 본인에게 있습니다."
+    )
+
+    # ---- 백테스트: 과거 이 판단이 나왔을 때 실제로 어떻게 됐나 ----
+    st.subheader("📊 백테스트 — 과거 이 판단, 실제로 맞았을까?")
+    st.caption(
+        f"조회 기간({df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')}) 동안 "
+        "'매수 고려/관망/회피' 판단이 나온 시점마다, 이후 실제 주가가 어떻게 움직였는지 집계한 결과입니다."
+    )
+
+    horizon_labels = {5: "1주", 20: "1개월", 60: "3개월", 120: "6개월"}
+    with st.spinner("과거 데이터로 신호 검증 중..."):
+        bt_results = backtest_forward_returns(df)
+
+    tabs = st.tabs([horizon_labels[h] for h in bt_results])
+    for tab, (h, table) in zip(tabs, bt_results.items()):
+        with tab:
+            show = table.copy()
+            for col in ["평균수익률", "승률", "최악", "최선"]:
+                show[col] = show[col].apply(lambda v: f"{v*100:+.1f}%" if pd.notna(v) else "표본 없음")
+            show = show.rename(columns={
+                "평균수익률": f"{horizon_labels[h]} 뒤 평균수익률",
+                "승률": "승률(상승 확률)",
+                "최악": "최악의 경우",
+                "최선": "최선의 경우",
+            })
+            st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.warning(
+        "※ 표본 구간들이 서로 겹쳐 있어 통계적으로 완전히 독립적인 표본은 아닙니다. "
+        "'과거엔 대체로 이랬다' 정도의 참고 자료이며, 과거 성과가 미래 수익을 보장하지 않습니다."
     )

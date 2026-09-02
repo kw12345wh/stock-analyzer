@@ -35,8 +35,9 @@ def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
     FinanceDataReader가 두 경우 모두 알아서 처리해준다.
     """
     if start is None:
-        # MA200을 안정적으로 계산하려면 최소 300여 거래일 데이터가 필요 -> 2년치 조회
-        start = (datetime.today() - timedelta(days=730)).strftime("%Y-%m-%d")
+        # MA200 계산 + 백테스트용 표본 확보를 위해 기본 6년치 조회
+        # (최근 상장 종목은 FinanceDataReader가 있는 만큼만 알아서 반환함)
+        start = (datetime.today() - timedelta(days=2200)).strftime("%Y-%m-%d")
 
     df = fdr.DataReader(ticker, start)
     if df is None or df.empty:
@@ -129,6 +130,102 @@ def analyze(df: pd.DataFrame) -> dict:
         "max_score": max_score,
         "decision": decision,
     }
+
+
+def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
+    """analyze()와 같은 규칙을 전체 기간에 대해 벡터 연산으로 계산한다 (백테스트용).
+
+    반환값: df와 같은 인덱스를 가진 DataFrame, 컬럼은 score(int), decision(str).
+    MA200이 아직 없는 초반 구간은 NaN으로 비워둔다.
+    """
+    close, ma5, ma10, ma60, ma200 = (
+        df["Close"], df["MA5"], df["MA10"], df["MA60"], df["MA200"],
+    )
+
+    def crossed_up_within(fast: pd.Series, slow: pd.Series, lookback: int) -> pd.Series:
+        event = (fast.shift(1) < slow.shift(1)) & (fast > slow)
+        return event.rolling(window=lookback + 1, min_periods=1).max().fillna(0).astype(bool)
+
+    def crossed_down_within(fast: pd.Series, slow: pd.Series, lookback: int) -> pd.Series:
+        event = (fast.shift(1) > slow.shift(1)) & (fast < slow)
+        return event.rolling(window=lookback + 1, min_periods=1).max().fillna(0).astype(bool)
+
+    bullish_align = (ma5 > ma10) & (ma10 > ma60) & (ma60 > ma200)
+    bearish_align = (ma5 < ma10) & (ma10 < ma60) & (ma60 < ma200)
+    price_above_200 = close > ma200
+    ma200_slope_up = ma200 > ma200.shift(20)
+    gc_5_10 = crossed_up_within(ma5, ma10, 5)
+    dc_5_10 = crossed_down_within(ma5, ma10, 5)
+    gc_10_60 = crossed_up_within(ma10, ma60, 20)
+    dc_10_60 = crossed_down_within(ma10, ma60, 20)
+    momentum_up = (close > ma5) & (close > ma10)
+    momentum_down = (close < ma5) & (close < ma10)
+
+    score = (
+        bullish_align.astype(int) * 2
+        + bearish_align.astype(int) * -2
+        + price_above_200.astype(int) * 1
+        + (~price_above_200).astype(int) * -1
+        + ma200_slope_up.fillna(False).astype(int) * 1
+        + gc_5_10.astype(int) * 1
+        + dc_5_10.astype(int) * -1
+        + gc_10_60.astype(int) * 1
+        + dc_10_60.astype(int) * -1
+        + momentum_up.astype(int) * 1
+        + momentum_down.astype(int) * -1
+    )
+
+    valid = ma200.notna()
+    score = score.where(valid)
+
+    decision = pd.cut(
+        score,
+        bins=[-100, 1, 4, 100],
+        labels=["매수 보류·회피", "관망", "매수 고려"],
+    )
+
+    return pd.DataFrame({"score": score, "decision": decision}, index=df.index)
+
+
+def backtest_forward_returns(df: pd.DataFrame, horizons=(5, 20, 60, 120)) -> dict:
+    """과거에 같은 판단(매수 고려/관망/회피)이 나왔을 때, 이후 N거래일 뒤 수익률이
+
+    실제로 어땠는지 집계한다. horizons 단위는 거래일 (5≈1주, 20≈1개월,
+    60≈3개월, 120≈6개월).
+
+    반환값: {horizon: DataFrame(판단, 표본수, 평균수익률, 승률, 최악, 최선)}
+    표본 기간이 서로 겹치므로(독립 표본 아님) 엄밀한 통계적 유의성보다는
+    "과거 이 신호가 나온 뒤 대체로 어떤 흐름이었는지" 참고용 지표다.
+    """
+    scored = compute_score_series(df)
+    close = df["Close"].to_numpy()
+    decisions = scored["decision"].to_numpy()
+    n = len(df)
+
+    results = {}
+    for h in horizons:
+        rows = []
+        for label in ["매수 고려", "관망", "매수 보류·회피"]:
+            idx = np.where(decisions == label)[0]
+            idx = idx[idx + h < n]
+            if len(idx) == 0:
+                rows.append(
+                    {"판단": label, "표본수": 0, "평균수익률": None, "승률": None, "최악": None, "최선": None}
+                )
+                continue
+            fwd = close[idx + h] / close[idx] - 1
+            rows.append(
+                {
+                    "판단": label,
+                    "표본수": int(len(idx)),
+                    "평균수익률": float(fwd.mean()),
+                    "승률": float((fwd > 0).mean()),
+                    "최악": float(fwd.min()),
+                    "최선": float(fwd.max()),
+                }
+            )
+        results[h] = pd.DataFrame(rows)
+    return results
 
 
 def print_report(ticker: str, result: dict) -> None:
@@ -253,12 +350,39 @@ def plot_chart(ticker: str, df: pd.DataFrame, result: dict, out_path: str, show:
     plt.close(fig)
 
 
+def print_backtest(ticker: str, df: pd.DataFrame) -> None:
+    horizon_labels = {5: "1주", 20: "1개월", 60: "3개월", 120: "6개월"}
+    results = backtest_forward_returns(df)
+
+    print("=" * 60)
+    print(f" 백테스트 : {ticker} — 과거 이 판단, 실제로 맞았을까?")
+    print(f" (조회 기간: {df.index[0].strftime('%Y-%m-%d')} ~ {df.index[-1].strftime('%Y-%m-%d')})")
+    print("=" * 60)
+    for h, table in results.items():
+        print(f"\n[{horizon_labels.get(h, f'{h}거래일')} 뒤 결과]")
+        for _, row in table.iterrows():
+            if row["표본수"] == 0:
+                print(f"  {row['판단']:<12} 표본 없음")
+                continue
+            print(
+                f"  {row['판단']:<12} 표본 {row['표본수']:>4}회 | "
+                f"평균 {row['평균수익률']*100:+6.1f}% | 승률 {row['승률']*100:5.1f}% | "
+                f"최악 {row['최악']*100:+6.1f}% | 최선 {row['최선']*100:+6.1f}%"
+            )
+    print("-" * 60)
+    print(
+        "※ 표본 기간이 서로 겹쳐 통계적으로 독립적이지 않으므로 참고용입니다.\n"
+        "  과거 성과가 미래 수익을 보장하지 않습니다."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="이동평균선 기반 매수 신호 분석기")
     parser.add_argument("ticker", help="종목코드 또는 티커 (예: 005930, AAPL, TSLA)")
     parser.add_argument("--start", default=None, help="조회 시작일 YYYY-MM-DD (기본: 2년 전)")
     parser.add_argument("--out", default=None, help="차트 이미지 저장 경로 (기본: <ticker>_ma_chart.png)")
     parser.add_argument("--show", action="store_true", help="차트 창을 화면에 직접 띄우기")
+    parser.add_argument("--backtest", action="store_true", help="과거 신호별 이후 수익률 백테스트 결과도 출력")
     args = parser.parse_args()
 
     try:
@@ -269,6 +393,10 @@ def main():
         sys.exit(1)
 
     print_report(args.ticker, result)
+
+    if args.backtest:
+        print()
+        print_backtest(args.ticker, df)
 
     out_path = args.out or f"{args.ticker}_ma_chart.png"
     plot_chart(args.ticker, df, result, out_path, args.show)
