@@ -321,16 +321,16 @@ if submitted or ticker:
             row=1, col=1,
         )
 
-    # 볼린저밴드 — 상단/하단은 두꺼운 검정 실선, 중간(20일 이평)은 검정 점선
+    # 볼린저밴드 — 상단은 두꺼운 빨간 실선, 하단은 두꺼운 파란 실선, 중간(20일 이평)은 검정 점선
     if "BB_UPPER" in plot_df:
         fig.add_trace(
             go.Scatter(x=plot_df.index, y=plot_df["BB_UPPER"], name="BB상단",
-                       line=dict(color="black", width=2)),
+                       line=dict(color="red", width=2)),
             row=1, col=1,
         )
         fig.add_trace(
             go.Scatter(x=plot_df.index, y=plot_df["BB_LOWER"], name="BB하단",
-                       line=dict(color="black", width=2)),
+                       line=dict(color="blue", width=2)),
             row=1, col=1,
         )
         fig.add_trace(
@@ -387,8 +387,8 @@ if submitted or ticker:
     st.caption(
         "기간 버튼(1개월/3개월/…)으로 빠르게 이동하거나, 하단 슬라이드바 양끝을 드래그해 구간을 조절하세요. "
         "핀치(또는 마우스 휠)로 확대/축소, 더블클릭하면 원상복구됩니다. "
-        "검정 실선(BB상단/하단)과 점선(BB중간)은 볼린저밴드로, 가격이 상단에 닿으면 과열, "
-        "하단에 닿으면 침체 구간으로 참고할 수 있어요."
+        "빨간 실선(BB상단)·파란 실선(BB하단)·검정 점선(BB중간)은 볼린저밴드로, 가격이 상단(빨강)에 닿으면 과열, "
+        "하단(파랑)에 닿으면 침체 구간으로 참고할 수 있어요."
     )
 
     st.info(
