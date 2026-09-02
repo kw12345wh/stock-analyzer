@@ -215,8 +215,10 @@ def simulate_position(
 ) -> dict:
     """분할매수 계획을 시뮬레이션해서 누적 평단가/투자금과, 최악 시나리오 손실을 계산한다.
 
-    plan: [{"drop_pct": 하락률(%), "amount": 매수금액}, ...]
+    plan: [{"drop_pct": 하락률(%), "amount": 매수금액, "buy_price": 실제 매수가(선택)}, ...]
           drop_pct=0이면 현재가에서 매수. amount<=0인 행은 무시.
+          buy_price를 직접 입력한 행은 그 값을 그대로 매수가로 쓰고(이미 체결된 실제 평단가 등),
+          drop_pct는 표시용으로 역산한다. buy_price가 없으면 drop_pct로 매수가를 계산한다.
     worst_case_price: 이 가격까지 떨어졌다고 가정했을 때의 평가손실을 계산 (None이면 생략)
     total_capital: 전체 투자 자산 (입력하면 손실이 전체 자산의 몇 %인지도 계산)
     """
@@ -228,8 +230,13 @@ def simulate_position(
         amount = step.get("amount", 0) or 0
         if amount <= 0:
             continue
-        drop = step.get("drop_pct", 0) or 0
-        buy_price = current_price * (1 - drop / 100)
+        explicit_price = step.get("buy_price") or 0
+        if explicit_price > 0:
+            buy_price = explicit_price
+            drop = (1 - buy_price / current_price) * 100  # 표시용: 현재가 대비 몇 % 하락한 가격인지 역산
+        else:
+            drop = step.get("drop_pct", 0) or 0
+            buy_price = current_price * (1 - drop / 100)
         if buy_price <= 0:
             continue
         shares = amount / buy_price

@@ -41,6 +41,15 @@ if submitted or ticker:
         st.error(f"오류: {e}")
         st.stop()
 
+    # 국내 종목(6자리 코드)은 원, 그 외(해외 티커)는 달러로 간주해서 표시 단위를 맞춤
+    is_krx = ticker.isdigit() and len(ticker) == 6
+    currency_symbol = "원" if is_krx else "$"
+    money_fmt = "%,d원" if is_krx else "$%,.2f"
+    amount_fmt = "%,d원" if is_krx else "$%,d"
+
+    def fmt_money(v) -> str:
+        return f"{v:,.0f}원" if is_krx else f"${v:,.2f}"
+
     # ---- 요약 카드 ----
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("기준일", result["date"])
@@ -98,49 +107,74 @@ if submitted or ticker:
     )
 
     total_capital = st.number_input(
-        "전체 투자 자산 (선택 — 입력하면 손실이 전체 자산의 몇 %인지도 계산됩니다)",
+        f"전체 투자 자산 (선택 — {currency_symbol} 단위, 입력하면 손실이 전체 자산의 몇 %인지도 계산됩니다)",
         min_value=0.0, value=0.0, step=1_000_000.0, format="%.0f",
     )
 
-    st.markdown("**분할매수 계획** (행 추가/삭제 가능 — 하락률 0%는 지금 시점 매수)")
+    st.markdown(
+        "**분할매수 계획** (행 추가/삭제 가능 — 하락률 0%는 지금 시점 매수. "
+        "'매수가(직접입력)'에 실제 체결가/평단가를 넣으면 하락률 대신 그 값을 그대로 사용해요.)"
+    )
+    # 매수가(직접입력)는 0이면 "미입력"으로 취급 (데이터 에디터에서 빈 값이 'None'으로
+    # 보기 흉하게 렌더링되는 문제를 피하기 위해 0을 미입력 값으로 사용)
     plan_df = st.data_editor(
-        pd.DataFrame({"하락률(%)": [0, 30, 40], "매수금액": [1_000_000, 1_000_000, 1_000_000]}),
+        pd.DataFrame({
+            "하락률(%)": pd.array([0, 30, 40], dtype="float64"),
+            "매수가(직접입력, 0=미입력)": pd.array([0, 0, 0], dtype="float64"),
+            "매수금액": pd.array([1_000_000, 1_000_000, 1_000_000], dtype="float64"),
+        }),
         num_rows="dynamic",
         use_container_width=True,
         key="position_plan_editor",
+        column_config={
+            "하락률(%)": st.column_config.NumberColumn("하락률(%)", format="%.1f%%"),
+            "매수가(직접입력, 0=미입력)": st.column_config.NumberColumn(
+                "매수가(직접입력, 0=미입력)", format=money_fmt,
+                help="이미 체결된 실제 매수가가 있으면 여기에 입력하세요. 0으로 두면 하락률로 계산합니다.",
+            ),
+            "매수금액": st.column_config.NumberColumn("매수금액", format=amount_fmt),
+        },
     )
 
     worst_case_options = {}
     if result.get("stop_loss"):
         for label, info in result["stop_loss"].items():
-            worst_case_options[f"{label} 손절선 ({info['price']:,.2f})"] = info["price"]
+            worst_case_options[f"{label} 손절선 ({fmt_money(info['price'])})"] = info["price"]
     worst_case_options["직접 입력"] = None
 
     wc_choice = st.selectbox("최악 시나리오 기준가 (여기까지 떨어진다고 가정)", list(worst_case_options.keys()))
     if worst_case_options[wc_choice] is None:
         worst_price = st.number_input(
-            "최악 시나리오 가격", min_value=0.0, value=float(result["close"]) * 0.7,
+            f"최악 시나리오 가격 ({currency_symbol})", min_value=0.0, value=float(result["close"]) * 0.7,
         )
     else:
         worst_price = worst_case_options[wc_choice]
 
-    plan = [
-        {"drop_pct": row["하락률(%)"], "amount": row["매수금액"]}
-        for _, row in plan_df.dropna().iterrows()
-    ]
+    plan = []
+    for _, row in plan_df.iterrows():
+        amount = row.get("매수금액")
+        if pd.isna(amount) or amount <= 0:
+            continue
+        buy_price = row.get("매수가(직접입력, 0=미입력)")
+        plan.append({
+            "drop_pct": row.get("하락률(%)") if pd.notna(row.get("하락률(%)")) else 0,
+            "amount": amount,
+            "buy_price": buy_price if pd.notna(buy_price) and buy_price > 0 else None,
+        })
     sim = simulate_position(result["close"], plan, worst_case_price=worst_price, total_capital=total_capital or None)
 
     if sim["steps"]:
         steps_show = pd.DataFrame(sim["steps"])
+        steps_show["하락률(%)"] = steps_show["하락률(%)"].map(lambda v: f"{v:.1f}%")
         for col in ["매수가", "매수금액", "누적평단가", "누적투자금"]:
-            steps_show[col] = steps_show[col].map(lambda v: f"{v:,.2f}")
+            steps_show[col] = steps_show[col].map(fmt_money)
         for col in ["매수수량", "누적수량"]:
             steps_show[col] = steps_show[col].map(lambda v: f"{v:,.4f}")
         st.dataframe(steps_show, use_container_width=True, hide_index=True)
 
         r1, r2, r3 = st.columns(3)
-        r1.metric("최종 평단가", f"{sim['avg_price']:,.2f}")
-        r2.metric("총 투자금", f"{sim['total_invested']:,.0f}")
+        r1.metric("최종 평단가", fmt_money(sim['avg_price']))
+        r2.metric("총 투자금", fmt_money(sim['total_invested']))
         r3.metric("총 보유수량", f"{sim['total_shares']:,.4f}")
 
         if sim.get("worst_case_loss") is not None:
@@ -152,14 +186,14 @@ if submitted or ticker:
             )
             if loss > 0:
                 st.error(
-                    f"**최악 시나리오** — 가격이 {sim['worst_case_price']:,.2f}까지 떨어지면: "
-                    f"평가손실 **{loss:,.0f}** (투자금 대비 **-{sim['worst_case_loss_pct']:.1f}%**)"
+                    f"**최악 시나리오** — 가격이 {fmt_money(sim['worst_case_price'])}까지 떨어지면: "
+                    f"평가손실 **{fmt_money(loss)}** (투자금 대비 **-{sim['worst_case_loss_pct']:.1f}%**)"
                     + capital_note
                 )
             else:
                 st.success(
-                    f"입력하신 기준가({sim['worst_case_price']:,.2f})는 최종 평단가({sim['avg_price']:,.2f})보다 "
-                    f"높아서, 이 시나리오에서는 오히려 평가이익 **+{abs(loss):,.0f}** "
+                    f"입력하신 기준가({fmt_money(sim['worst_case_price'])})는 최종 평단가({fmt_money(sim['avg_price'])})보다 "
+                    f"높아서, 이 시나리오에서는 오히려 평가이익 **+{fmt_money(abs(loss))}** "
                     f"(투자금 대비 **+{abs(sim['worst_case_loss_pct']):.1f}%**)입니다. "
                     "분할매수로 평단가를 충분히 낮췄다는 뜻이에요 — 진짜 '최악'을 보려면 "
                     "기준가를 최종 매수 단계보다 더 낮게 입력해보세요."
