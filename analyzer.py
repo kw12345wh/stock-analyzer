@@ -48,8 +48,26 @@ def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
     df = df.sort_index()
     for w in MA_WINDOWS:
         df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
+    df["ATR14"] = compute_atr(df, period=14)
 
     return df
+
+
+def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """ATR(Average True Range, 평균 변동폭)을 계산한다.
+
+    True Range = 다음 중 최댓값
+      - 당일 고가 - 당일 저가
+      - |당일 고가 - 전일 종가|
+      - |당일 저가 - 전일 종가|
+    ATR은 이 True Range의 period일 이동평균. 값이 클수록 변동성이 큰 종목이다.
+    """
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
+    ).max(axis=1)
+    return true_range.rolling(window=period).mean()
 
 
 def crossed_above(fast: pd.Series, slow: pd.Series, lookback: int) -> bool:
@@ -123,6 +141,10 @@ def analyze(df: pd.DataFrame) -> dict:
     else:
         decision = "매수 보류·회피 (기술적 신호 부정적)"
 
+    atr = last.get("ATR14")
+    atr_pct = (atr / close * 100) if pd.notna(atr) else None
+    stop_loss = suggest_stop_loss(close, atr) if pd.notna(atr) else None
+
     return {
         "date": df.index[-1].strftime("%Y-%m-%d"),
         "close": close,
@@ -131,6 +153,23 @@ def analyze(df: pd.DataFrame) -> dict:
         "score": score,
         "max_score": max_score,
         "decision": decision,
+        "atr": atr if pd.notna(atr) else None,
+        "atr_pct": atr_pct,
+        "stop_loss": stop_loss,
+    }
+
+
+def suggest_stop_loss(close: float, atr: float) -> dict:
+    """ATR(변동성) 기반으로 손절 후보선을 배수별로 제시한다.
+
+    배수가 작을수록(1.5x) 타이트하게 끊는 대신 정상적인 변동에도 자주 걸리고,
+    배수가 클수록(3x) 여유는 있지만 손실 폭이 커진다. 정답은 없고
+    본인의 리스크 허용도에 맞춰 고르는 참고용 기준선이다.
+    """
+    multipliers = {"보수적 (1.5×ATR)": 1.5, "표준 (2×ATR)": 2.0, "여유있게 (3×ATR)": 3.0}
+    return {
+        label: {"price": close - m * atr, "pct_below": (m * atr) / close * 100}
+        for label, m in multipliers.items()
     }
 
 
@@ -247,6 +286,14 @@ def print_report(ticker: str, result: dict) -> None:
     print("-" * 60)
     print(f"종합 점수 : {result['score']} / 최대 {result['max_score']}")
     print(f"판단      : {result['decision']}")
+    print("-" * 60)
+    if result.get("stop_loss"):
+        print(f"변동성(ATR14) : {result['atr']:,.2f}  (현재가의 {result['atr_pct']:.1f}%)")
+        print("ATR 기반 손절선 후보 (정답은 없음, 리스크 허용도에 맞게 선택)")
+        for label, info in result["stop_loss"].items():
+            print(f"  {label:<16} : {info['price']:,.2f}  (현재가 대비 -{info['pct_below']:.1f}%)")
+    else:
+        print("변동성(ATR) 계산에 필요한 데이터가 부족합니다.")
     print("=" * 60)
     print(
         "※ 본 결과는 5/10/60/200일 이동평균선 규칙만으로 계산한 참고용 기술적 신호이며,\n"

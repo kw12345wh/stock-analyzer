@@ -66,6 +66,24 @@ if submitted or ticker:
         sign = f"+{pts}" if pts > 0 else f"{pts}"
         st.markdown(f"{mark} `{sign:>3}` {desc}")
 
+    # ---- ATR 기반 손절선 후보 ----
+    st.subheader("🛡️ 변동성 기반 손절선 (ATR)")
+    if result.get("stop_loss"):
+        st.caption(
+            f"최근 14일 평균 변동폭(ATR)은 {result['atr']:,.2f} — 현재가의 {result['atr_pct']:.1f}% 수준이에요. "
+            "이 변동성을 기준으로 손절선 후보를 배수별로 계산했습니다. 정답은 없고 "
+            "본인의 리스크 허용도에 맞는 배수를 참고용으로 고르시면 됩니다."
+        )
+        stop_cols = st.columns(3)
+        for c, (label, info) in zip(stop_cols, result["stop_loss"].items()):
+            c.metric(label, f"{info['price']:,.2f}", f"-{info['pct_below']:.1f}%")
+        st.caption(
+            "배수가 작을수록(1.5×) 타이트하게 끊어서 손실은 작지만 정상적인 등락에도 자주 걸리고, "
+            "배수가 클수록(3×) 여유는 있지만 손실 폭이 커집니다."
+        )
+    else:
+        st.info("변동성(ATR) 계산에 필요한 데이터가 부족합니다.")
+
     # ---- 차트 (인터랙티브: 핀치/드래그 확대, 커서 위치 가격 표시) ----
     st.subheader("차트")
     plot_df = df.tail(300)
