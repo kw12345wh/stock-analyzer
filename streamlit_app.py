@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from analyzer import MA_WINDOWS, analyze, backtest_forward_returns, fetch_data
+from analyzer import MA_WINDOWS, analyze, backtest_forward_returns, fetch_data, simulate_position
 
 st.set_page_config(page_title="이동평균선 매수 신호 분석기", page_icon="📈", layout="wide")
 
@@ -83,6 +83,88 @@ if submitted or ticker:
         )
     else:
         st.info("변동성(ATR) 계산에 필요한 데이터가 부족합니다.")
+
+    # ---- 포지션 사이징 / 최대손실 계산기 ----
+    st.subheader("💰 포지션 사이징 / 최대손실 계산기")
+    st.caption(
+        "분할매수 계획(1차 매수 + 하락 시 추가매수)을 입력하면 누적 평단가·총 투자금과, "
+        "최악의 경우 얼마를 잃는지 미리 계산해드려요."
+    )
+
+    total_capital = st.number_input(
+        "전체 투자 자산 (선택 — 입력하면 손실이 전체 자산의 몇 %인지도 계산됩니다)",
+        min_value=0.0, value=0.0, step=1_000_000.0, format="%.0f",
+    )
+
+    st.markdown("**분할매수 계획** (행 추가/삭제 가능 — 하락률 0%는 지금 시점 매수)")
+    plan_df = st.data_editor(
+        pd.DataFrame({"하락률(%)": [0, 30, 40], "매수금액": [1_000_000, 1_000_000, 1_000_000]}),
+        num_rows="dynamic",
+        use_container_width=True,
+        key="position_plan_editor",
+    )
+
+    worst_case_options = {}
+    if result.get("stop_loss"):
+        for label, info in result["stop_loss"].items():
+            worst_case_options[f"{label} 손절선 ({info['price']:,.2f})"] = info["price"]
+    worst_case_options["직접 입력"] = None
+
+    wc_choice = st.selectbox("최악 시나리오 기준가 (여기까지 떨어진다고 가정)", list(worst_case_options.keys()))
+    if worst_case_options[wc_choice] is None:
+        worst_price = st.number_input(
+            "최악 시나리오 가격", min_value=0.0, value=float(result["close"]) * 0.7,
+        )
+    else:
+        worst_price = worst_case_options[wc_choice]
+
+    plan = [
+        {"drop_pct": row["하락률(%)"], "amount": row["매수금액"]}
+        for _, row in plan_df.dropna().iterrows()
+    ]
+    sim = simulate_position(result["close"], plan, worst_case_price=worst_price, total_capital=total_capital or None)
+
+    if sim["steps"]:
+        steps_show = pd.DataFrame(sim["steps"])
+        for col in ["매수가", "매수금액", "누적평단가", "누적투자금"]:
+            steps_show[col] = steps_show[col].map(lambda v: f"{v:,.2f}")
+        for col in ["매수수량", "누적수량"]:
+            steps_show[col] = steps_show[col].map(lambda v: f"{v:,.4f}")
+        st.dataframe(steps_show, use_container_width=True, hide_index=True)
+
+        r1, r2, r3 = st.columns(3)
+        r1.metric("최종 평단가", f"{sim['avg_price']:,.2f}")
+        r2.metric("총 투자금", f"{sim['total_invested']:,.0f}")
+        r3.metric("총 보유수량", f"{sim['total_shares']:,.4f}")
+
+        if sim.get("worst_case_loss") is not None:
+            loss = sim["worst_case_loss"]
+            capital_note = (
+                f" · 전체 자산 대비 **{sim['worst_case_loss_pct_of_capital']:.1f}%**"
+                if "worst_case_loss_pct_of_capital" in sim
+                else ""
+            )
+            if loss > 0:
+                st.error(
+                    f"**최악 시나리오** — 가격이 {sim['worst_case_price']:,.2f}까지 떨어지면: "
+                    f"평가손실 **{loss:,.0f}** (투자금 대비 **-{sim['worst_case_loss_pct']:.1f}%**)"
+                    + capital_note
+                )
+            else:
+                st.success(
+                    f"입력하신 기준가({sim['worst_case_price']:,.2f})는 최종 평단가({sim['avg_price']:,.2f})보다 "
+                    f"높아서, 이 시나리오에서는 오히려 평가이익 **+{abs(loss):,.0f}** "
+                    f"(투자금 대비 **+{abs(sim['worst_case_loss_pct']):.1f}%**)입니다. "
+                    "분할매수로 평단가를 충분히 낮췄다는 뜻이에요 — 진짜 '최악'을 보려면 "
+                    "기준가를 최종 매수 단계보다 더 낮게 입력해보세요."
+                )
+    else:
+        st.info("위 표에 매수금액을 입력하면 결과가 계산됩니다.")
+
+    st.caption(
+        "※ 소수 단위 매수 가능 여부는 증권사·시장마다 다릅니다. 이 계산은 참고용 시뮬레이션이며, "
+        "실제 체결가/수수료/세금은 반영되지 않았습니다."
+    )
 
     # ---- 차트 (인터랙티브: 핀치/드래그 확대, 커서 위치 가격 표시) ----
     st.subheader("차트")

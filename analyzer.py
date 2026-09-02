@@ -184,6 +184,65 @@ def suggest_stop_loss(close: float, atr: float) -> dict:
     }
 
 
+def simulate_position(
+    current_price: float,
+    plan: list[dict],
+    worst_case_price: float | None = None,
+    total_capital: float | None = None,
+) -> dict:
+    """분할매수 계획을 시뮬레이션해서 누적 평단가/투자금과, 최악 시나리오 손실을 계산한다.
+
+    plan: [{"drop_pct": 하락률(%), "amount": 매수금액}, ...]
+          drop_pct=0이면 현재가에서 매수. amount<=0인 행은 무시.
+    worst_case_price: 이 가격까지 떨어졌다고 가정했을 때의 평가손실을 계산 (None이면 생략)
+    total_capital: 전체 투자 자산 (입력하면 손실이 전체 자산의 몇 %인지도 계산)
+    """
+    rows = []
+    cum_invested = 0.0
+    cum_shares = 0.0
+
+    for step in plan:
+        amount = step.get("amount", 0) or 0
+        if amount <= 0:
+            continue
+        drop = step.get("drop_pct", 0) or 0
+        buy_price = current_price * (1 - drop / 100)
+        if buy_price <= 0:
+            continue
+        shares = amount / buy_price
+        cum_invested += amount
+        cum_shares += shares
+        rows.append(
+            {
+                "하락률(%)": drop,
+                "매수가": buy_price,
+                "매수금액": amount,
+                "매수수량": shares,
+                "누적평단가": cum_invested / cum_shares,
+                "누적투자금": cum_invested,
+                "누적수량": cum_shares,
+            }
+        )
+
+    result = {
+        "steps": rows,
+        "total_invested": cum_invested,
+        "total_shares": cum_shares,
+        "avg_price": (cum_invested / cum_shares) if cum_shares else None,
+    }
+
+    if worst_case_price is not None and cum_shares:
+        position_value = cum_shares * worst_case_price
+        loss = cum_invested - position_value
+        result["worst_case_price"] = worst_case_price
+        result["worst_case_loss"] = loss
+        result["worst_case_loss_pct"] = (loss / cum_invested * 100) if cum_invested else None
+        if total_capital:
+            result["worst_case_loss_pct_of_capital"] = loss / total_capital * 100
+
+    return result
+
+
 def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
     """analyze()와 같은 규칙을 전체 기간에 대해 벡터 연산으로 계산한다 (백테스트용).
 
