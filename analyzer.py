@@ -16,6 +16,8 @@
     py analyzer.py 005930 --out samsung.png
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 from datetime import datetime, timedelta
