@@ -86,6 +86,43 @@ if submitted or ticker:
         sign = f"+{pts}" if pts > 0 else f"{pts}"
         st.markdown(f"{mark} `{sign:>3}` {desc}")
 
+    # ---- RSI (과매수/과매도) ----
+    st.subheader("📐 RSI (상대강도지수)")
+    if result.get("rsi") is not None:
+        rsi_badge = {"과매수": "🔴 과매수", "과매도": "🔵 과매도", "중립": "⚪ 중립"}[result["rsi_status"]]
+        rcol1, rcol2 = st.columns(2)
+        rcol1.metric("RSI(14)", f"{result['rsi']:.1f}")
+        rcol2.metric("상태", rsi_badge)
+        st.caption(
+            "최근 상승폭과 하락폭의 비율을 0~100으로 나타낸 지표예요. "
+            "**70 이상이면 과매수**(단기간에 많이 올라 조정 가능성), "
+            "**30 이하면 과매도**(단기간에 많이 내려 반등 가능성)로 봐요. "
+            "이동평균선은 후행지표라 놓치기 쉬운 '단기 과열/침체'를 보완해줘요."
+        )
+    else:
+        st.info("RSI 계산에 필요한 데이터가 부족합니다.")
+
+    # ---- MACD (골든/데드크로스) ----
+    st.subheader("📉 MACD")
+    if result.get("macd") is not None:
+        if result["macd_golden_cross"]:
+            macd_badge = "🟢 골든크로스 (최근 5거래일 내)"
+        elif result["macd_dead_cross"]:
+            macd_badge = "🔴 데드크로스 (최근 5거래일 내)"
+        else:
+            macd_badge = "➖ 최근 교차 없음"
+        mcol1, mcol2, mcol3 = st.columns(3)
+        mcol1.metric("MACD", f"{result['macd']:.2f}")
+        mcol2.metric("시그널선", f"{result['macd_signal_line']:.2f}")
+        mcol3.metric("교차 신호", macd_badge)
+        st.caption(
+            "MACD선이 시그널선을 아래에서 위로 뚫으면 **골든크로스**(상승 전환 신호), "
+            "위에서 아래로 뚫으면 **데드크로스**(하락 전환 신호)로 봐요. "
+            "MA5-MA10 크로스보다 좀 더 매끄럽게 추세 전환을 잡아내는 지표예요."
+        )
+    else:
+        st.info("MACD 계산에 필요한 데이터가 부족합니다.")
+
     # ---- ATR 기반 손절선 후보 ----
     st.subheader("🛡️ 변동성 기반 손절선 (ATR)")
     if result.get("stop_loss"):
@@ -284,6 +321,24 @@ if submitted or ticker:
             row=1, col=1,
         )
 
+    # 볼린저밴드 — 상단/하단은 두꺼운 검정 실선, 중간(20일 이평)은 검정 점선
+    if "BB_UPPER" in plot_df:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df["BB_UPPER"], name="BB상단",
+                       line=dict(color="black", width=2)),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df["BB_LOWER"], name="BB하단",
+                       line=dict(color="black", width=2)),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df["BB_MID"], name="BB중간",
+                       line=dict(color="black", width=1, dash="dot")),
+            row=1, col=1,
+        )
+
     # 거래량 바 — 전일 대비 상승/하락에 따라 색상 구분
     prev_close = plot_df["Close"].shift(1)
     volume_colors = ["#e74c3c" if c >= p else "#3498db" for c, p in zip(plot_df["Close"], prev_close)]
@@ -331,7 +386,9 @@ if submitted or ticker:
     st.plotly_chart(fig, use_container_width=True, config=plotly_config)
     st.caption(
         "기간 버튼(1개월/3개월/…)으로 빠르게 이동하거나, 하단 슬라이드바 양끝을 드래그해 구간을 조절하세요. "
-        "핀치(또는 마우스 휠)로 확대/축소, 더블클릭하면 원상복구됩니다."
+        "핀치(또는 마우스 휠)로 확대/축소, 더블클릭하면 원상복구됩니다. "
+        "검정 실선(BB상단/하단)과 점선(BB중간)은 볼린저밴드로, 가격이 상단에 닿으면 과열, "
+        "하단에 닿으면 침체 구간으로 참고할 수 있어요."
     )
 
     st.info(

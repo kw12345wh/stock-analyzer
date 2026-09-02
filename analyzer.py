@@ -51,6 +51,15 @@ def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
     # 장중이라 당일 고가/저가가 아직 확정 안 된 경우를 대비해 직전 유효값으로 채움
     df["ATR14"] = compute_atr(df, period=14).ffill()
     df["VMA20"] = df["Volume"].rolling(window=20).mean()
+    df["RSI14"] = compute_rsi(df, period=14)
+    macd_line, macd_signal = compute_macd(df)
+    df["MACD"] = macd_line
+    df["MACD_SIGNAL"] = macd_signal
+    df["MACD_HIST"] = macd_line - macd_signal
+    df["BB_MID"] = df["Close"].rolling(window=20).mean()
+    bb_std = df["Close"].rolling(window=20).std()
+    df["BB_UPPER"] = df["BB_MID"] + 2 * bb_std
+    df["BB_LOWER"] = df["BB_MID"] - 2 * bb_std
 
     return df
 
@@ -80,6 +89,38 @@ def compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         true_range = close.diff().abs()
 
     return true_range.rolling(window=period).mean()
+
+
+def compute_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """RSI(상대강도지수)를 계산한다 (Wilder의 지수평활 방식).
+
+    최근 상승폭과 하락폭의 비율로 "많이 오른 뒤라 과매수인지, 많이 내린 뒤라
+    과매도인지"를 0~100 사이 값으로 나타낸다. 보통 70 이상이면 과매수(단기 과열),
+    30 이하면 과매도(단기 침체)로 본다.
+    """
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
+def compute_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9):
+    """MACD선과 시그널선을 계산한다.
+
+    MACD선(단기 12일 지수이동평균 - 장기 26일 지수이동평균)이 시그널선(MACD선의
+    9일 지수이동평균)을 아래에서 위로 뚫으면 골든크로스(상승 전환 신호),
+    위에서 아래로 뚫으면 데드크로스(하락 전환 신호)로 본다.
+
+    반환값: (macd_line, signal_line) 튜플.
+    """
+    ema_fast = df["Close"].ewm(span=fast, adjust=False).mean()
+    ema_slow = df["Close"].ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
 
 
 def crossed_above(fast: pd.Series, slow: pd.Series, lookback: int) -> bool:
@@ -162,6 +203,25 @@ def analyze(df: pd.DataFrame) -> dict:
         ("거래량이 20일 평균의 절반 이하로 급감 — 관심 저조, 다른 신호의 신뢰도가 낮아짐", volume_dry, 0)
     )
 
+    # 7) RSI — 과매수/과매도 (단기 되돌림 가능성)
+    rsi = last.get("RSI14")
+    rsi_oversold = pd.notna(rsi) and rsi <= 30
+    rsi_overbought = pd.notna(rsi) and rsi >= 70
+    if pd.notna(rsi):
+        rsi_status = "과매도" if rsi_oversold else ("과매수" if rsi_overbought else "중립")
+    else:
+        rsi_status = None
+    checks.append(("RSI 30 이하 — 과매도 구간, 단기 반등 가능성", rsi_oversold, 1))
+    checks.append(("RSI 70 이상 — 과매수 구간, 단기 과열 주의", rsi_overbought, -1))
+
+    # 8) MACD — 골든크로스/데드크로스 (추세 전환 신호)
+    macd_val = last.get("MACD")
+    macd_signal_val = last.get("MACD_SIGNAL")
+    macd_golden_cross = crossed_above(df["MACD"], df["MACD_SIGNAL"], lookback=5)
+    macd_dead_cross = crossed_below(df["MACD"], df["MACD_SIGNAL"], lookback=5)
+    checks.append(("최근 5거래일 내 MACD 골든크로스 발생", macd_golden_cross, 1))
+    checks.append(("최근 5거래일 내 MACD 데드크로스 발생", macd_dead_cross, -1))
+
     score = sum(pts for _, ok, pts in checks if ok)
     max_score = sum(pts for _, _, pts in checks if pts > 0)
 
@@ -190,6 +250,12 @@ def analyze(df: pd.DataFrame) -> dict:
         "volume": volume if pd.notna(volume) else None,
         "vma20": vma20 if pd.notna(vma20) else None,
         "volume_ratio": volume_ratio,
+        "rsi": rsi if pd.notna(rsi) else None,
+        "rsi_status": rsi_status,
+        "macd": macd_val if pd.notna(macd_val) else None,
+        "macd_signal_line": macd_signal_val if pd.notna(macd_signal_val) else None,
+        "macd_golden_cross": macd_golden_cross,
+        "macd_dead_cross": macd_dead_cross,
     }
 
 
@@ -309,6 +375,11 @@ def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
     volume_spike_up = volume_spike & price_up_day
     volume_spike_down = volume_spike & price_down_day
 
+    rsi_oversold = df["RSI14"] <= 30
+    rsi_overbought = df["RSI14"] >= 70
+    macd_gc = crossed_up_within(df["MACD"], df["MACD_SIGNAL"], 5)
+    macd_dc = crossed_down_within(df["MACD"], df["MACD_SIGNAL"], 5)
+
     score = (
         bullish_align.astype(int) * 2
         + bearish_align.astype(int) * -2
@@ -323,6 +394,10 @@ def compute_score_series(df: pd.DataFrame) -> pd.DataFrame:
         + momentum_down.astype(int) * -1
         + volume_spike_up.fillna(False).astype(int) * 1
         + volume_spike_down.fillna(False).astype(int) * -1
+        + rsi_oversold.fillna(False).astype(int) * 1
+        + rsi_overbought.fillna(False).astype(int) * -1
+        + macd_gc.astype(int) * 1
+        + macd_dc.astype(int) * -1
     )
 
     valid = ma200.notna()
@@ -388,6 +463,11 @@ def print_report(ticker: str, result: dict) -> None:
         print(f"{name:<6}       : {val:,.2f}")
     if result.get("volume") is not None and result.get("vma20") is not None:
         print(f"거래량       : {result['volume']:,.0f}  (20일 평균 {result['vma20']:,.0f}, {result['volume_ratio']:.2f}배)")
+    if result.get("rsi") is not None:
+        print(f"RSI(14)      : {result['rsi']:.1f}  ({result['rsi_status']})")
+    if result.get("macd") is not None:
+        cross = "골든크로스" if result["macd_golden_cross"] else ("데드크로스" if result["macd_dead_cross"] else "-")
+        print(f"MACD         : {result['macd']:.2f}  (시그널선 {result['macd_signal_line']:.2f}, 최근 5일내 {cross})")
     print("-" * 60)
     print("체크리스트")
     for desc, ok, pts in result["checks"]:
