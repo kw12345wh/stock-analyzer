@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime, timedelta
 
 import FinanceDataReader as fdr
@@ -29,19 +30,39 @@ import pandas as pd
 MA_WINDOWS = [5, 10, 60, 200]
 
 
-def fetch_data(ticker: str, start: str | None = None) -> pd.DataFrame:
+def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> pd.DataFrame:
     """FinanceDataReader로 시세를 가져온다.
 
     - 6자리 숫자 코드(예: 005930)면 한국 KRX 종목으로 처리
     - 그 외(AAPL, TSLA 등)는 해외 티커로 그대로 조회
     FinanceDataReader가 두 경우 모두 알아서 처리해준다.
+
+    해외 티커는 내부적으로 Yahoo Finance를 쓰는데, 배포 서버처럼 여러 앱이 IP를
+    공유하는 환경에서는 이따금 "429 Too Many Requests"로 일시 차단될 수 있다.
+    이 경우 잠깐 대기 후 자동으로 재시도한다.
     """
     if start is None:
         # MA200 계산 + 백테스트용 표본 확보를 위해 기본 6년치 조회
         # (최근 상장 종목은 FinanceDataReader가 있는 만큼만 알아서 반환함)
         start = (datetime.today() - timedelta(days=2200)).strftime("%Y-%m-%d")
 
-    df = fdr.DataReader(ticker, start)
+    df = None
+    for attempt in range(max_retries):
+        try:
+            df = fdr.DataReader(ticker, start)
+            break
+        except Exception as e:
+            is_rate_limited = "429" in str(e) or "Too Many Requests" in str(e)
+            if is_rate_limited and attempt < max_retries - 1:
+                time.sleep(2 * (attempt + 1))  # 2초, 4초 ... 점점 늘려가며 재시도
+                continue
+            if is_rate_limited:
+                raise ValueError(
+                    f"'{ticker}' 데이터 소스(Yahoo Finance)가 일시적으로 요청을 제한하고 있습니다. "
+                    "1~2분 뒤 다시 시도해주세요."
+                ) from e
+            raise
+
     if df is None or df.empty:
         raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
 

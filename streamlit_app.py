@@ -17,6 +17,13 @@ from analyzer import MA_WINDOWS, analyze, backtest_forward_returns, fetch_data, 
 
 st.set_page_config(page_title="이동평균선 매수 신호 분석기", page_icon="📈", layout="wide")
 
+
+@st.cache_data(ttl=600, show_spinner=False)
+def cached_fetch_data(ticker: str) -> pd.DataFrame:
+    # 같은 종목을 10분 내에 다시 조회하면 Yahoo Finance에 재요청하지 않고 캐시를 재사용.
+    # 여러 사용자가 같은 종목을 몰아서 조회할 때 발생하는 429(Too Many Requests)를 줄여준다.
+    return fetch_data(ticker)
+
 st.title("📈 이동평균선 매수 신호 분석기")
 st.caption("5 / 10 / 60 / 200일 이동평균선 규칙 기반 참고용 기술적 분석 도구")
 
@@ -35,7 +42,7 @@ if submitted or ticker:
 
     try:
         with st.spinner(f"'{ticker}' 데이터 조회 중..."):
-            df = fetch_data(ticker)
+            df = cached_fetch_data(ticker)
             result = analyze(df)
     except Exception as e:
         st.error(f"오류: {e}")
