@@ -112,8 +112,10 @@ if submitted or ticker:
     )
 
     st.markdown(
-        "**분할매수 계획** (행 추가/삭제 가능 — 하락률 0%는 지금 시점 매수. "
-        "'매수가(직접입력)'에 실제 체결가/평단가를 넣으면 하락률 대신 그 값을 그대로 사용해요.)"
+        "**분할매수 계획** (행 추가/삭제 가능. "
+        "맨 위 행에 실제 1차 매수가를 입력하면, 그 아래 행들의 하락률(%)은 **오늘 현재가가 아니라 "
+        "이 1차 매수가를 기준으로** 계산돼요. 맨 위 행을 비워두면(0) 오늘 현재가 기준으로 계산합니다. "
+        "매수금액은 계산 없이 직접 입력하시면 됩니다.)"
     )
     # 매수가(직접입력)는 0이면 "미입력"으로 취급 (데이터 에디터에서 빈 값이 'None'으로
     # 보기 흉하게 렌더링되는 문제를 피하기 위해 0을 미입력 값으로 사용)
@@ -161,7 +163,16 @@ if submitted or ticker:
             "amount": amount,
             "buy_price": buy_price if pd.notna(buy_price) and buy_price > 0 else None,
         })
-    sim = simulate_position(result["close"], plan, worst_case_price=worst_price, total_capital=total_capital or None)
+
+    # 하락률(%)만 입력한 행의 기준가 — 맨 위 행에 실제 1차 매수가가 있으면 그 가격을 기준으로,
+    # 없으면 오늘 현재가를 기준으로 계산 (첫 행 자체는 buy_price가 있으면 그 값을 그대로 씀)
+    anchor_price = result["close"]
+    if len(plan_df) > 0:
+        first_buy_price = plan_df.iloc[0].get("매수가(직접입력, 0=미입력)")
+        if pd.notna(first_buy_price) and first_buy_price > 0:
+            anchor_price = first_buy_price
+
+    sim = simulate_position(anchor_price, plan, worst_case_price=worst_price, total_capital=total_capital or None)
 
     if sim["steps"]:
         steps_show = pd.DataFrame(sim["steps"])
