@@ -50,6 +50,11 @@ if submitted or ticker:
     def fmt_money(v) -> str:
         return f"{v:,.0f}원" if is_krx else f"${v:,.2f}"
 
+    def fmt_money_md(v) -> str:
+        # st.write/markdown/error/success처럼 마크다운을 해석하는 곳에 넣을 때 전용.
+        # "$"가 두 번 나오면 그 사이를 수식(LaTeX)으로 오인해 통째로 사라지므로 이스케이프한다.
+        return fmt_money(v).replace("$", r"\$")
+
     # ---- 요약 카드 ----
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("기준일", result["date"])
@@ -197,14 +202,14 @@ if submitted or ticker:
             )
             if loss > 0:
                 st.error(
-                    f"**최악 시나리오** — 가격이 {fmt_money(sim['worst_case_price'])}까지 떨어지면: "
-                    f"평가손실 **{fmt_money(loss)}** (투자금 대비 **-{sim['worst_case_loss_pct']:.1f}%**)"
+                    f"**최악 시나리오** — 가격이 {fmt_money_md(sim['worst_case_price'])}까지 떨어지면: "
+                    f"평가손실 **{fmt_money_md(loss)}** (투자금 대비 **-{sim['worst_case_loss_pct']:.1f}%**)"
                     + capital_note
                 )
             else:
                 st.success(
-                    f"입력하신 기준가({fmt_money(sim['worst_case_price'])})는 최종 평단가({fmt_money(sim['avg_price'])})보다 "
-                    f"높아서, 이 시나리오에서는 오히려 평가이익 **+{fmt_money(abs(loss))}** "
+                    f"입력하신 기준가({fmt_money_md(sim['worst_case_price'])})는 최종 평단가({fmt_money_md(sim['avg_price'])})보다 "
+                    f"높아서, 이 시나리오에서는 오히려 평가이익 **+{fmt_money_md(abs(loss))}** "
                     f"(투자금 대비 **+{abs(sim['worst_case_loss_pct']):.1f}%**)입니다. "
                     "분할매수로 평단가를 충분히 낮췄다는 뜻이에요 — 진짜 '최악'을 보려면 "
                     "기준가를 최종 매수 단계보다 더 낮게 입력해보세요."
@@ -345,19 +350,68 @@ if submitted or ticker:
     with st.spinner("과거 데이터로 신호 검증 중..."):
         bt_results = backtest_forward_returns(df)
 
+    decision_style = {
+        "매수 고려": ("🟢", "#2ecc71"),
+        "관망": ("🟡", "#f39c12"),
+        "매수 보류·회피": ("🔴", "#e74c3c"),
+    }
+    example_amount = 1_000_000 if is_krx else 1_000  # "이 돈을 넣었다면" 예시용 금액
+
     tabs = st.tabs([horizon_labels[h] for h in bt_results])
     for tab, (h, table) in zip(tabs, bt_results.items()):
         with tab:
-            show = table.copy()
-            for col in ["평균수익률", "승률", "최악", "최선"]:
-                show[col] = show[col].apply(lambda v: f"{v*100:+.1f}%" if pd.notna(v) else "표본 없음")
-            show = show.rename(columns={
-                "평균수익률": f"{horizon_labels[h]} 뒤 평균수익률",
-                "승률": "승률(상승 확률)",
-                "최악": "최악의 경우",
-                "최선": "최선의 경우",
-            })
-            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.caption(f"과거에 이 신호가 떴을 때 샀다고 가정하고, {horizon_labels[h]} 뒤 결과를 봤어요.")
+            cols = st.columns(3)
+            for c, (_, row) in zip(cols, table.iterrows()):
+                label = row["판단"]
+                emoji, color = decision_style.get(label, ("⚪", "#888888"))
+                with c:
+                    st.markdown(f"##### {emoji} {label}")
+                    n = row["표본수"]
+                    if n == 0 or pd.isna(row["평균수익률"]):
+                        st.caption("표본 없음")
+                        continue
+                    avg, win, worst, best = row["평균수익률"], row["승률"], row["최악"], row["최선"]
+                    verb = "올랐어요" if avg >= 0 else "내렸어요"
+                    st.markdown(
+                        f"<span style='font-size:1.8rem; font-weight:700; color:{color};'>"
+                        f"{avg*100:+.1f}%</span> <span style='color:gray;'>{verb}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    st.write(f"과거 {n}번 중 **10번에 {round(win*10)}번꼴**로 상승했어요")
+                    result_amount = example_amount * (1 + avg)
+                    st.write(f"{fmt_money_md(example_amount)} 넣었다면 → **{fmt_money_md(result_amount)}**")
+                    st.caption(f"최악 {worst*100:+.1f}% / 최선 {best*100:+.1f}%")
+
+            # 세 판단의 평균수익률을 막대그래프로 한눈에 비교
+            chart_table = table.dropna(subset=["평균수익률"])
+            if not chart_table.empty:
+                pct = chart_table["평균수익률"] * 100
+                fig_bt = go.Figure(
+                    go.Bar(
+                        x=chart_table["판단"], y=pct,
+                        marker_color=["#2ecc71" if v >= 0 else "#e74c3c" for v in pct],
+                        text=[f"{v:+.1f}%" for v in pct],
+                        textposition="outside",
+                    )
+                )
+                fig_bt.update_layout(
+                    height=260, margin=dict(l=10, r=10, t=20, b=10),
+                    yaxis_title=f"{horizon_labels[h]} 뒤 평균수익률(%)",
+                )
+                st.plotly_chart(fig_bt, use_container_width=True, config={"displayModeBar": False})
+
+            with st.expander("🔍 자세한 숫자로 보기 (표본수·승률 등)"):
+                show = table.copy()
+                for col in ["평균수익률", "승률", "최악", "최선"]:
+                    show[col] = show[col].apply(lambda v: f"{v*100:+.1f}%" if pd.notna(v) else "표본 없음")
+                show = show.rename(columns={
+                    "평균수익률": f"{horizon_labels[h]} 뒤 평균수익률",
+                    "승률": "승률(상승 확률)",
+                    "최악": "최악의 경우",
+                    "최선": "최선의 경우",
+                })
+                st.dataframe(show, use_container_width=True, hide_index=True)
 
     st.warning(
         "※ 표본 구간들이 서로 겹쳐 있어 통계적으로 완전히 독립적인 표본은 아닙니다. "
