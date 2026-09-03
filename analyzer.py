@@ -39,18 +39,20 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
 
     해외 티커는 내부적으로 Yahoo Finance를 쓰는데, 배포 서버처럼 여러 앱이 IP를
     공유하는 환경에서는 이따금 "429 Too Many Requests"로 일시 차단될 수 있다.
-    이 경우 잠깐 대기 후 자동으로 재시도한다.
+    이 경우 잠깐 대기 후 자동으로 재시도한다. 또한 Yahoo가 명확한 에러 없이
+    반쪽짜리(최근 며칠치만) 데이터를 조용히 돌려주는 경우도 있어, 요청 기간에 비해
+    데이터가 비정상적으로 짧으면 이것도 같은 방식으로 재시도한다.
     """
     if start is None:
         # MA200 계산 + 백테스트용 표본 확보를 위해 기본 6년치 조회
         # (최근 상장 종목은 FinanceDataReader가 있는 만큼만 알아서 반환함)
         start = (datetime.today() - timedelta(days=2200)).strftime("%Y-%m-%d")
 
+    min_rows_needed = max(MA_WINDOWS)  # MA200 계산에 필요한 최소 거래일 수
     df = None
     for attempt in range(max_retries):
         try:
-            df = fdr.DataReader(ticker, start)
-            break
+            candidate = fdr.DataReader(ticker, start)
         except Exception as e:
             is_rate_limited = "429" in str(e) or "Too Many Requests" in str(e)
             if is_rate_limited and attempt < max_retries - 1:
@@ -63,10 +65,25 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
                 ) from e
             raise
 
+        # 신생 상장주라 원래 짧은 건지, 일시적으로 잘려서 온 건지는 구분할 수 없지만,
+        # 재시도해서 더 긴 데이터가 오면 그걸 쓰고, 끝까지 짧으면 실제로 짧은 것으로 보고 진행한다.
+        df = candidate
+        if candidate is not None and not candidate.empty and len(candidate) >= min_rows_needed:
+            break
+        if attempt < max_retries - 1:
+            time.sleep(2 * (attempt + 1))
+            continue
+
     if df is None or df.empty:
         raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
 
     df = df.sort_index()
+    # Yahoo가 당일 장이 아직 시작 전이거나 데이터가 안 채워졌을 때 "오늘" 날짜에
+    # 종가가 비어있는 빈 자리(placeholder) 행을 맨 끝에 끼워넣는 경우가 있다.
+    # 이 행을 그대로 "최신 데이터"로 쓰면 모든 지표가 NaN이 되어버리므로 제거한다.
+    df = df[df["Close"].notna()]
+    if df.empty:
+        raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
     for w in MA_WINDOWS:
         df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
     # 장중이라 당일 고가/저가가 아직 확정 안 된 경우를 대비해 직전 유효값으로 채움
