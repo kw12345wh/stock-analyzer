@@ -65,6 +65,14 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
                 ) from e
             raise
 
+        # Yahoo가 당일 장이 아직 시작 전이거나 데이터가 안 채워졌을 때 "오늘" 날짜에
+        # 종가가 비어있는 빈 자리(placeholder) 행을 맨 끝에 끼워넣는 경우가 있다. 이 행을
+        # 그대로 "최신 데이터"로 쓰면 모든 지표가 NaN이 되므로, 길이를 판단하기 전에 먼저
+        # 걸러낸다(안 그러면 딱 경계선의 종목은 이 placeholder 행 때문에 길이 체크를 통과해놓고
+        # 실제로는 데이터가 부족한 채로 넘어갈 수 있다).
+        if candidate is not None and not candidate.empty:
+            candidate = candidate[candidate["Close"].notna()]
+
         # 신생 상장주라 원래 짧은 건지, 일시적으로 잘려서 온 건지는 구분할 수 없지만,
         # 재시도해서 더 긴 데이터가 오면 그걸 쓰고, 끝까지 짧으면 실제로 짧은 것으로 보고 진행한다.
         df = candidate
@@ -78,12 +86,6 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
         raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
 
     df = df.sort_index()
-    # Yahoo가 당일 장이 아직 시작 전이거나 데이터가 안 채워졌을 때 "오늘" 날짜에
-    # 종가가 비어있는 빈 자리(placeholder) 행을 맨 끝에 끼워넣는 경우가 있다.
-    # 이 행을 그대로 "최신 데이터"로 쓰면 모든 지표가 NaN이 되어버리므로 제거한다.
-    df = df[df["Close"].notna()]
-    if df.empty:
-        raise ValueError(f"'{ticker}' 데이터를 가져오지 못했습니다. 티커/종목코드를 확인하세요.")
     for w in MA_WINDOWS:
         df[f"MA{w}"] = df["Close"].rolling(window=w).mean()
     # 장중이라 당일 고가/저가가 아직 확정 안 된 경우를 대비해 직전 유효값으로 채움
@@ -201,7 +203,7 @@ def analyze(df: pd.DataFrame) -> dict:
 
     # 3) MA200 기울기 — 장기추세 방향
     ma200_slope_up = None
-    if len(df) > 220 and not pd.isna(df["MA200"].iloc[-21]):
+    if len(df) >= 220 and not pd.isna(df["MA200"].iloc[-21]):
         ma200_slope_up = ma200 > df["MA200"].iloc[-21]
         checks.append(("MA200이 20거래일 전보다 상승 중 (장기추세 우상향)", ma200_slope_up, 1))
 

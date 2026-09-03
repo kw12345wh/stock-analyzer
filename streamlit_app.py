@@ -268,7 +268,7 @@ if submitted or ticker:
 
     # ---- 거래량 요약 ----
     st.subheader("📊 거래량")
-    if result.get("volume") is not None and result.get("vma20") is not None:
+    if result.get("volume") is not None and result.get("volume_ratio") is not None:
         vcol1, vcol2, vcol3 = st.columns(3)
         vcol1.metric("당일 거래량", f"{result['volume']:,.0f}")
         vcol2.metric("20일 평균 거래량", f"{result['vma20']:,.0f}")
