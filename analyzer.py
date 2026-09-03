@@ -55,6 +55,7 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
             candidate = fdr.DataReader(ticker, start)
         except Exception as e:
             is_rate_limited = "429" in str(e) or "Too Many Requests" in str(e)
+            is_not_found = "404" in str(e) or "Not Found" in str(e)
             if is_rate_limited and attempt < max_retries - 1:
                 time.sleep(2 * (attempt + 1))  # 2초, 4초 ... 점점 늘려가며 재시도
                 continue
@@ -63,7 +64,10 @@ def fetch_data(ticker: str, start: str | None = None, max_retries: int = 3) -> p
                     f"'{ticker}' 데이터 소스(Yahoo Finance)가 일시적으로 요청을 제한하고 있습니다. "
                     "1~2분 뒤 다시 시도해주세요."
                 ) from e
-            raise
+            if is_not_found:
+                raise ValueError(f"'{ticker}' 종목을 찾을 수 없습니다. 티커/종목코드를 다시 확인해주세요.") from e
+            # 그 밖의 예상 못한 오류도 원본 에러 URL 등을 그대로 노출하지 않고 깔끔하게 감싼다
+            raise ValueError(f"'{ticker}' 데이터를 가져오는 중 문제가 발생했습니다: {e}") from e
 
         # Yahoo가 당일 장이 아직 시작 전이거나 데이터가 안 채워졌을 때 "오늘" 날짜에
         # 종가가 비어있는 빈 자리(placeholder) 행을 맨 끝에 끼워넣는 경우가 있다. 이 행을

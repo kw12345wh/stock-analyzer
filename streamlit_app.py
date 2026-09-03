@@ -46,6 +46,8 @@ if submitted or ticker:
             result = analyze(df)
     except Exception as e:
         st.error(f"오류: {e}")
+        st.caption("일시적인 오류일 수 있어요 (특히 Yahoo Finance 요청 제한). 아래 버튼으로 바로 다시 시도해보세요.")
+        st.button("🔄 다시 시도")
         st.stop()
 
     # 국내 종목(6자리 코드)은 원, 그 외(해외 티커)는 달러로 간주해서 표시 단위를 맞춤
