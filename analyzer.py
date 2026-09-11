@@ -206,6 +206,14 @@ def analyze(df: pd.DataFrame) -> dict:
     checks.append(("현재가가 MA200(장기추세선) 위에 위치", price_above_200, 1))
     checks.append(("현재가가 MA200 아래에 위치 (장기 약세 구간)", not price_above_200, -1))
 
+    # 현재가 대비 각 이동평균선 이격도(%) — 양수=그 이평선 위, 음수=아래 (요약 카드 배지용)
+    ma_pct_diff = {
+        "MA5": (close - ma5) / ma5 * 100,
+        "MA10": (close - ma10) / ma10 * 100,
+        "MA60": (close - ma60) / ma60 * 100,
+        "MA200": ma200_pct_diff,
+    }
+
     # 3) MA200 기울기 — 장기추세 방향
     ma200_slope_up = None
     if len(df) >= 220 and not pd.isna(df["MA200"].iloc[-21]):
@@ -287,6 +295,7 @@ def analyze(df: pd.DataFrame) -> dict:
         "ma": {"MA5": ma5, "MA10": ma10, "MA60": ma60, "MA200": ma200},
         "price_above_200": price_above_200,
         "ma200_pct_diff": ma200_pct_diff,
+        "ma_pct_diff": ma_pct_diff,
         "checks": checks,
         "score": score,
         "max_score": max_score,
