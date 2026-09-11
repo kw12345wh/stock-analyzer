@@ -202,6 +202,7 @@ def analyze(df: pd.DataFrame) -> dict:
 
     # 2) 장기추세 필터 — 현재가와 MA200
     price_above_200 = close > ma200
+    ma200_pct_diff = (close - ma200) / ma200 * 100  # 양수=MA200 위, 음수=MA200 아래
     checks.append(("현재가가 MA200(장기추세선) 위에 위치", price_above_200, 1))
     checks.append(("현재가가 MA200 아래에 위치 (장기 약세 구간)", not price_above_200, -1))
 
@@ -284,6 +285,8 @@ def analyze(df: pd.DataFrame) -> dict:
         "date": df.index[-1].strftime("%Y-%m-%d"),
         "close": close,
         "ma": {"MA5": ma5, "MA10": ma10, "MA60": ma60, "MA200": ma200},
+        "price_above_200": price_above_200,
+        "ma200_pct_diff": ma200_pct_diff,
         "checks": checks,
         "score": score,
         "max_score": max_score,

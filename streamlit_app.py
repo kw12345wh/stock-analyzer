@@ -86,7 +86,12 @@ if submitted or ticker:
     # ---- 이동평균선 값 ----
     ma_cols = st.columns(4)
     for c, (name, val) in zip(ma_cols, result["ma"].items()):
-        c.metric(name, f"{val:,.2f}")
+        if name == "MA200" and result.get("ma200_pct_diff") is not None:
+            diff = result["ma200_pct_diff"]
+            # 델타 문자열이 "-"로 시작하면 빨간 아래 화살표, 아니면 초록 위 화살표로 자동 표시됨
+            c.metric(name, f"{val:,.2f}", f"{diff:+.1f}% ({'위' if diff >= 0 else '아래'})")
+        else:
+            c.metric(name, f"{val:,.2f}")
 
     # ---- 체크리스트 ----
     st.subheader("체크리스트")
